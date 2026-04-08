@@ -1,41 +1,32 @@
 #!/usr/bin/env python3
 """
-Diagnostic script — visits a URL and prints everything it finds.
-Tries playwright-stealth first, falls back to standard Playwright.
+Diagnostic script for the shared image discovery engine.
 
-Usage:
-  python diagnose.py <url>
+Visits one URL, gathers diagnose-style image evidence, and prints the ranked
+image candidates that the production scraper will try.
 """
 
 import sys
+
 from playwright.sync_api import sync_playwright
 
-url = sys.argv[1] if len(sys.argv) > 1 else "https://food.ndtv.com/recipe-3-ingredient-onion-pickle-955910"
+from image_discovery import ImageDiscoveryEngine
 
-# Try to import stealth — optional dependency
 try:
     from playwright_stealth import stealth_sync
     STEALTH_AVAILABLE = True
-    print("[*] playwright-stealth found — stealth mode ON")
 except ImportError:
     STEALTH_AVAILABLE = False
-    print("[!] playwright-stealth not installed — running without stealth")
-    print("    Install with: pip install playwright-stealth")
 
-print(f"\n{'='*60}")
-print(f"Diagnosing: {url}")
-print(f"{'='*60}\n")
 
-intercepted_images = []
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(
+def make_browser_context(playwright_instance):
+    browser = playwright_instance.chromium.launch(
         headless=True,
         args=[
             "--no-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
-        ]
+        ],
     )
     context = browser.new_context(
         user_agent=(
@@ -47,96 +38,82 @@ with sync_playwright() as p:
         locale="en-IN",
         timezone_id="Asia/Kolkata",
         extra_http_headers={
-            "Accept":                  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language":         "en-IN,en;q=0.9",
-            "Accept-Encoding":         "gzip, deflate, br",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-IN,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest":          "document",
-            "Sec-Fetch-Mode":          "navigate",
-            "Sec-Fetch-Site":          "none",
-            "Sec-Fetch-User":          "?1",
-            "Sec-CH-UA":               '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-            "Sec-CH-UA-Mobile":        "?0",
-            "Sec-CH-UA-Platform":      '"macOS"',
-        }
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Sec-CH-UA": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"macOS"',
+        },
     )
-
-    # Manual fingerprint patches (always applied)
-    context.add_init_script("""
+    context.add_init_script(
+        """
         Object.defineProperty(navigator, 'webdriver',  { get: () => undefined });
         Object.defineProperty(navigator, 'plugins',    { get: () => [1, 2, 3, 4, 5] });
         Object.defineProperty(navigator, 'languages',  { get: () => ['en-IN', 'en'] });
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(screen, 'colorDepth',   { get: () => 24 });
         window.chrome = { runtime: {} };
-    """)
-
+        """
+    )
     page = context.new_page()
-
-    # Apply stealth on top if available — patches ~20 additional fingerprint vectors
     if STEALTH_AVAILABLE:
         stealth_sync(page)
+    return browser, context, page
 
-    def on_request(request):
-        if any(x in request.url for x in ['.jpg', '.jpeg', '.png', '.webp', '.gif', 'cpcdn', 'image', 'ndtvimg']):
-            intercepted_images.append(request.url)
 
-    page.on("request", on_request)
+def main():
+    url = sys.argv[1] if len(sys.argv) > 1 else "https://food.ndtv.com/recipe-3-ingredient-onion-pickle-955910"
 
-    print("[*] Loading page...")
-    try:
-        response = page.goto(url, wait_until="networkidle", timeout=30000)
-        print(f"[*] HTTP status   : {response.status}")
-    except Exception as e:
-        print(f"[!] networkidle timed out — trying domcontentloaded...")
-        try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            print(f"[*] HTTP status   : {response.status}")
-        except Exception as e2:
-            print(f"[X] Failed to load page: {e2}")
-            browser.close()
-            sys.exit(1)
-
-    print(f"[*] Final URL     : {page.url}")
-    page.wait_for_timeout(3000)
-    print(f"[*] Page title    : {page.title()[:80]}")
-
-    images = page.evaluate("""() => {
-        return Array.from(document.querySelectorAll('img')).map(img => ({
-            src:     img.getAttribute('src'),
-            dataSrc: img.getAttribute('data-src'),
-            srcset:  img.getAttribute('srcset'),
-            width:   img.naturalWidth,
-            height:  img.naturalHeight,
-            alt:     img.alt
-        }));
-    }""")
-
-    print(f"\n[*] Total <img> tags found: {len(images)}")
-    for idx, im in enumerate(images[:15]):  # cap at 15 for readability
-        print(f"\n  [{idx}] src     : {im['src']}")
-        print(f"       data-src : {im['dataSrc']}")
-        srcset_preview = im['srcset'][:80] + '...' if im['srcset'] and len(im['srcset']) > 80 else im['srcset']
-        print(f"       srcset   : {srcset_preview}")
-        print(f"       size     : {im['width']}x{im['height']}")
-        print(f"       alt      : {im['alt']}")
-    if len(images) > 15:
-        print(f"\n  ... and {len(images) - 15} more")
-
-    og = page.evaluate(
-        "() => { const m = document.querySelector('meta[property=\"og:image\"]'); return m ? m.content : null; }"
-    )
-    print(f"\n[*] og:image meta : {og}")
-
-    print(f"\n[*] Network image requests intercepted:")
-    if intercepted_images:
-        for img_url in intercepted_images[:20]:
-            print(f"  {img_url}")
+    if STEALTH_AVAILABLE:
+        print("[*] playwright-stealth found — stealth mode ON")
     else:
-        print("  (none)")
+        print("[!] playwright-stealth not installed — running without stealth")
+        print("    Install with: pip install playwright-stealth")
 
-    browser.close()
+    print(f"\n{'=' * 60}")
+    print(f"Diagnosing: {url}")
+    print(f"{'=' * 60}\n")
 
-print(f"\n{'='*60}")
-print("Diagnosis complete.")
-print(f"{'='*60}\n")
+    with sync_playwright() as p:
+        browser, context, page = make_browser_context(p)
+        discovery = ImageDiscoveryEngine(page, context)
+
+        try:
+            result = discovery.diagnose(url)
+        finally:
+            browser.close()
+
+    print(f"[*] Final URL     : {result['final_url']}")
+    print(f"[*] Page title    : {result['title'][:100]}")
+    print(f"[*] DOM images    : {result['dom_image_count']}")
+    print(f"[*] Network hits  : {len(result['network_images'])}")
+
+    best = result.get("best_candidate")
+    if best:
+        print(f"\n[*] Best candidate: {best['url']}")
+        print(f"    source={best['source']} score={best['score']}")
+    else:
+        print("\n[!] No image candidate found")
+
+    print("\n[*] Top candidates:")
+    for idx, candidate in enumerate(result["candidates"][:10], start=1):
+        print(f"  [{idx}] score={candidate['score']:>3} source={candidate['source']:<13} {candidate['url']}")
+
+    if result["network_images"]:
+        print("\n[*] Sample network image requests:")
+        for candidate in result["network_images"][:15]:
+            print(f"  {candidate}")
+
+    print(f"\n{'=' * 60}")
+    print("Diagnosis complete.")
+    print(f"{'=' * 60}\n")
+
+
+if __name__ == "__main__":
+    main()
