@@ -1,8 +1,0 @@
-# Core dependencies
-playwright>=1.40.0
-pandas>=2.0.0
-openpyxl>=3.1.0
-
-# Optional — strongly recommended
-# Reduces bot-detection fingerprint on moderately protected sites
-# playwright-stealth>=1.0.6
