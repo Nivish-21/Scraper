@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Scraper outputs
+*_output/
+*_images_output/
+_checkpoint.txt
+_invalid.xlsx
+*_log.csv
+
+# Datasets (usually large or private)
+*.csv
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
